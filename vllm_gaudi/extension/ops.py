@@ -1669,6 +1669,7 @@ class MoeMXFP4Matmul(torch.nn.Module):
 
     def __init__(self):
         super().__init__()
+        print("PAT PAT MXFP4 3")
 
     def set_weight(self, w: torch.Tensor):
         """w: packed uint8 tensor, shape (rows, ceil(cols/2))."""
@@ -1699,6 +1700,7 @@ class VllmMixtureOfExpertsOpMXFP4(VllmMixtureOfExpertsOpBase):
                  block_size: int = 32,
                  dispatch_fn: Callable[[torch.Tensor], torch.Tensor] = None):
         super().__init__(global_num_experts, num_total_experts, experts_min, experts_max, None, dispatch_fn)
+        print("PAT PAT MXFP4 1")
         self.block_size = block_size
         self.w13_list = torch.nn.ModuleList([MoeMXFP4Matmul() for _ in range(num_total_experts)])
         self.w2_list = torch.nn.ModuleList([MoeMXFP4Matmul() for _ in range(num_total_experts)])
@@ -1749,6 +1751,7 @@ class VllmMixtureOfExpertsOpMXFP4(VllmMixtureOfExpertsOpBase):
         return self._compiled_forward
 
     def forward(self, hidden_states, expert_routing_table, router_weights, permuted_weights=True, activation="silu"):
+        print("PAT PAT MXFP4 2")
         tokens_num, _ = hidden_states.shape
         activation = _as_activation_str(activation)
         kwargs = self._get_extra_kwargs(tokens_num)
