@@ -480,7 +480,9 @@ _MOE_COMPILE = os.getenv("HPU_FUSED_MOE", "1") == "1"
 
 def _patched_default_moe_runner_forward(self, *args, **kwargs):
     if _MOE_COMPILE:
+        # print("PAT PAT 13")
         return patched_fused_moe_forward(self, *args, **kwargs)
+    # print("PAT PAT 14")
     return _orig_default_moe_runner_forward(self, *args, **kwargs)
 
 

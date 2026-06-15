@@ -4,7 +4,7 @@
 # This source code is licensed under the Apache 2.0 license found in the
 # LICENSE file in the root directory of this source tree.
 ###############################################################################
-from typing import Callable, Optional, Tuple, List, Union
+from typing import Callable, Optional, Tuple, List, Union, Dict, Any
 import habana_frameworks.torch as htorch
 import torch
 import torch.nn.functional as F
@@ -40,6 +40,131 @@ try:
 except ValueError:
     logger.warning("Invalid MAX_EXPERTS_PER_SLICE value, using default -1")
     MAX_EXPERTS_PER_SLICE = -1
+
+
+_MOE_DEBUG_PRINTED_SHAPES: Dict[int, Dict[int, bool]] = {}
+_MOE_DEBUG_DUMP_DIR = os.environ.get("MOE_DEBUG_DUMP_DIR", "/software/users/pmerchex/mxfp4/bf_dumps")
+_MOE_DEBUG_REPRO_NAME = "repro_hpu.py"
+
+try:
+    _MOE_DEBUG_ITERATION = int(os.environ.get("MOE_DEBUG_START_ITERATION", "0"))
+except ValueError:
+    logger.warning("Invalid MOE_DEBUG_START_ITERATION value, using default 0")
+    _MOE_DEBUG_ITERATION = 0
+
+
+def _next_moe_iteration() -> int:
+    global _MOE_DEBUG_ITERATION
+    iteration = _MOE_DEBUG_ITERATION
+    _MOE_DEBUG_ITERATION += 1
+    return iteration
+
+
+def _mark_moe_shape_seen(hidden_states_shape: torch.Size) -> bool:
+    if len(hidden_states_shape) < 2:
+        return True
+
+    dim0 = int(hidden_states_shape[0])
+    dim1 = int(hidden_states_shape[1])
+    dim1_map = _MOE_DEBUG_PRINTED_SHAPES.setdefault(dim0, {})
+    if dim1 in dim1_map:
+        return False
+
+    dim1_map[dim1] = True
+    return True
+
+
+def _print_tensor_details(name: str, tensor: torch.Tensor) -> None:
+    print(f"{name}.shape:", tensor.shape)
+    print(f"{name}.dtype:", tensor.dtype)
+    print(" ")
+
+
+def _save_tensor(path: str, tensor: torch.Tensor) -> None:
+    torch.save(tensor.detach().to("cpu"), path)
+
+
+def _dump_moe_debug_case(hidden_states: torch.Tensor,
+                         expert_routing_table: torch.Tensor,
+                         router_weights: torch.Tensor,
+                         w13_list,
+                         w2_list,
+                         w13_bias_list,
+                         w2_bias_list,
+                         permuted_weights: bool,
+                         experts_min: int,
+                         experts_max: int,
+                         activation: str,
+                         extra_kwargs: Dict[str, Any]) -> None:
+    if hidden_states.dim() < 2:
+        return
+
+    iteration = _next_moe_iteration()
+    prefix = str(iteration)
+
+    dim0 = int(hidden_states.shape[0])
+    dim1 = int(hidden_states.shape[1])
+    case_dir = os.path.join(_MOE_DEBUG_DUMP_DIR, f"iter_{iteration:06d}")
+    os.makedirs(case_dir, exist_ok=True)
+
+    print("PAT PAT 1.1")
+    print("iteration:", iteration)
+    print("shape_key:", f"{dim0}x{dim1}")
+    _print_tensor_details("hidden_states", hidden_states)
+    _print_tensor_details("expert_routing_table", expert_routing_table)
+    _print_tensor_details("router_weights", router_weights)
+
+    for idx, tensor in enumerate(w13_list):
+        _print_tensor_details(f"w13_list[{idx}]", tensor)
+    for idx, tensor in enumerate(w2_list):
+        _print_tensor_details(f"w2_list[{idx}]", tensor)
+
+    if w13_bias_list is not None:
+        for idx, tensor in enumerate(w13_bias_list):
+            _print_tensor_details(f"_cached_w13_bias_views[{idx}]", tensor)
+    if w2_bias_list is not None:
+        for idx, tensor in enumerate(w2_bias_list):
+            _print_tensor_details(f"_cached_w2_bias_views[{idx}]", tensor)
+
+    print("permuted_weights:", permuted_weights)
+    print("experts_min:", experts_min)
+    print("experts_max:", experts_max)
+
+    _save_tensor(os.path.join(case_dir, f"{prefix}_hidden_states.pt"), hidden_states)
+    _save_tensor(os.path.join(case_dir, f"{prefix}_expert_routing_table.pt"), expert_routing_table)
+    _save_tensor(os.path.join(case_dir, f"{prefix}_router_weights.pt"), router_weights)
+
+    for idx, tensor in enumerate(w13_list):
+        _save_tensor(os.path.join(case_dir, f"{prefix}_w13_{idx:03d}.pt"), tensor)
+    for idx, tensor in enumerate(w2_list):
+        _save_tensor(os.path.join(case_dir, f"{prefix}_w2_{idx:03d}.pt"), tensor)
+
+    has_bias = w13_bias_list is not None and w2_bias_list is not None
+    if has_bias:
+        for idx, tensor in enumerate(w13_bias_list):
+            _save_tensor(os.path.join(case_dir, f"{prefix}_w13_bias_{idx:03d}.pt"), tensor)
+        for idx, tensor in enumerate(w2_bias_list):
+            _save_tensor(os.path.join(case_dir, f"{prefix}_w2_bias_{idx:03d}.pt"), tensor)
+
+    meta = {
+        "iteration": iteration,
+        "shape": [dim0, dim1],
+        "has_bias": has_bias,
+        "num_w13": len(w13_list),
+        "num_w2": len(w2_list),
+        "num_w13_bias": len(w13_bias_list) if has_bias else 0,
+        "num_w2_bias": len(w2_bias_list) if has_bias else 0,
+        "permuted_weights": bool(permuted_weights),
+        "experts_min": int(experts_min),
+        "experts_max": int(experts_max),
+        "activation": activation,
+        "extra_kwargs": extra_kwargs,
+    }
+    torch.save(meta, os.path.join(case_dir, f"{prefix}_meta.pt"))
+
+    print("dump_dir:", case_dir)
+    print("prefix:", prefix)
+    print("=====================")
 
 
 def _as_activation_str(activation):
@@ -665,6 +790,7 @@ class VllmMixtureOfExpertsOp(VllmMixtureOfExpertsOpBase):
         return ret
 
     def forward(self, hidden_states, expert_routing_table, router_weights, permuted_weights=True, activation="silu"):
+        # print("PAT PAT 1")
         tokens_num, _ = hidden_states.shape
         activation = _as_activation_str(activation)
         kwargs = self._get_extra_kwargs(tokens_num) if self.bias is None else None
@@ -675,6 +801,23 @@ class VllmMixtureOfExpertsOp(VllmMixtureOfExpertsOpBase):
 
         w13_list = self._cached_w13_views
         w2_list = self._cached_w2_views
+
+        if _mark_moe_shape_seen(hidden_states.shape):
+            try:
+                _dump_moe_debug_case(hidden_states=hidden_states,
+                                     expert_routing_table=expert_routing_table,
+                                     router_weights=router_weights,
+                                     w13_list=w13_list,
+                                     w2_list=w2_list,
+                                     w13_bias_list=self._cached_w13_bias_views,
+                                     w2_bias_list=self._cached_w2_bias_views,
+                                     permuted_weights=permuted_weights,
+                                     experts_min=self.experts_min,
+                                     experts_max=self.experts_max,
+                                     activation=activation,
+                                     extra_kwargs=kwargs if kwargs is not None else {})
+            except Exception:
+                logger.exception("Failed MoE debug dump for hidden_states.shape=%s", tuple(hidden_states.shape))
 
         if self.moe_n_slice == 1:
             if self.bias is not None:
@@ -699,7 +842,6 @@ class VllmMixtureOfExpertsOp(VllmMixtureOfExpertsOpBase):
                                                         experts_min=self.experts_min,
                                                         experts_max=self.experts_max,
                                                         **kwargs)
-
         if self.bias is not None:
             w13_bias_list = self._cached_w13_bias_views
             w2_bias_list = self._cached_w2_bias_views
