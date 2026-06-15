@@ -1,4 +1,5 @@
 from collections.abc import Iterable
+import os
 
 import torch
 from transformers import PretrainedConfig
@@ -21,6 +22,14 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 _original_normalize_quantization_config = ModelArchConfigConvertorBase._normalize_quantization_config
 _original_load_weights = GptOssModel.load_weights
 
+# HPU_MXFP4_NATIVE controls the MXFP4 execution strategy:
+#   True (HPU_MXFP4_NATIVE=1): If weights are packed, use native
+#     torch.ops.hpu.mixture_of_experts.mxfp4_fused_weights kernel.
+#     Quant config flows through normally (GptOssMxfp4Config is active).
+#     Upstream _load_weights_mxfp4 is used for weight loading.
+#   False (default, HPU_MXFP4_NATIVE=0): Suppress quant config, dequantize
+#     weights to BF16 at load time (legacy behavior).
+HPU_MXFP4_NATIVE = os.environ.get("HPU_MXFP4_NATIVE", "0") == "1"
 
 def _patched_normalize_quantization_config(self, config: PretrainedConfig):
     # When HPU_MXFP4_NATIVE=False (legacy mode), suppress the mxfp4 quant
