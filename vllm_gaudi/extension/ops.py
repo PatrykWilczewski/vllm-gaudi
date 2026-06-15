@@ -36,6 +36,8 @@ logger = logging.getLogger(__name__)
 
 _MOE_DEBUG_PRINTED_SHAPES: Dict[int, Dict[int, bool]] = {}
 _MOE_DEBUG_DUMP_DIR = os.environ.get("MOE_DEBUG_DUMP_DIR", "/software/users/pmerchex/mxfp4/bf_dumps")
+_MOE_MXFP4_DEBUG_PRINTED_SHAPES: Dict[int, Dict[int, bool]] = {}
+_MOE_MXFP4_DEBUG_DUMP_DIR = os.environ.get("MOE_MXFP4_DEBUG_DUMP_DIR", "/software/users/pmerchex/mxfp4/mx_dumps")
 _MOE_DEBUG_REPRO_NAME = "repro_hpu.py"
 
 # MAX_EXPERTS_PER_SLICE is needed for 1.20, up to 64 experts per slice
@@ -65,6 +67,20 @@ def _mark_moe_shape_seen(hidden_states_shape: torch.Size) -> bool:
     dim0 = int(hidden_states_shape[0])
     dim1 = int(hidden_states_shape[1])
     dim1_map = _MOE_DEBUG_PRINTED_SHAPES.setdefault(dim0, {})
+    if dim1 in dim1_map:
+        return False
+
+    dim1_map[dim1] = True
+    return True
+
+
+def _mark_moe_mxfp4_shape_seen(hidden_states_shape: torch.Size) -> bool:
+    if len(hidden_states_shape) < 2:
+        return True
+
+    dim0 = int(hidden_states_shape[0])
+    dim1 = int(hidden_states_shape[1])
+    dim1_map = _MOE_MXFP4_DEBUG_PRINTED_SHAPES.setdefault(dim0, {})
     if dim1 in dim1_map:
         return False
 
@@ -163,6 +179,86 @@ def _dump_moe_debug_case(hidden_states: torch.Tensor,
     print("dump_dir:", case_dir)
     print("prefix:", prefix)
     print("=====================")
+
+
+def _dump_moe_mxfp4_debug_case(hidden_states: torch.Tensor,
+                               expert_routing_table: torch.Tensor,
+                               router_weights: torch.Tensor,
+                               w12_list,
+                               w3_list,
+                               d_scale_w12,
+                               d_scale_w3,
+                               block_size: int,
+                               permuted_weights: bool,
+                               experts_min: int,
+                               experts_max: int,
+                               activation: str,
+                               extra_kwargs: Dict[str, Any]) -> None:
+    if hidden_states.dim() < 2:
+        return
+
+    iteration = _next_moe_iteration()
+    prefix = str(iteration)
+
+    dim0 = int(hidden_states.shape[0])
+    dim1 = int(hidden_states.shape[1])
+    case_dir = os.path.join(_MOE_MXFP4_DEBUG_DUMP_DIR, f"iter_{iteration:06d}")
+    os.makedirs(case_dir, exist_ok=True)
+
+    print("PAT PAT MXFP4 2.1")
+    print("iteration:", iteration)
+    print("shape_key:", f"{dim0}x{dim1}")
+    _print_tensor_details("hidden_states", hidden_states)
+    _print_tensor_details("expert_routing_table", expert_routing_table)
+    _print_tensor_details("router_weights", router_weights)
+
+    for idx, tensor in enumerate(w12_list):
+        _print_tensor_details(f"w12_list[{idx}]", tensor)
+    for idx, tensor in enumerate(w3_list):
+        _print_tensor_details(f"w3_list[{idx}]", tensor)
+    for idx, tensor in enumerate(d_scale_w12):
+        _print_tensor_details(f"d_scale_w12[{idx}]", tensor)
+    for idx, tensor in enumerate(d_scale_w3):
+        _print_tensor_details(f"d_scale_w3[{idx}]", tensor)
+
+    print("block_size:", int(block_size))
+    print("permuted_weights:", permuted_weights)
+    print("experts_min:", experts_min)
+    print("experts_max:", experts_max)
+
+    _save_tensor(os.path.join(case_dir, f"{prefix}_hidden_states.pt"), hidden_states)
+    _save_tensor(os.path.join(case_dir, f"{prefix}_expert_routing_table.pt"), expert_routing_table)
+    _save_tensor(os.path.join(case_dir, f"{prefix}_router_weights.pt"), router_weights)
+
+    for idx, tensor in enumerate(w12_list):
+        _save_tensor(os.path.join(case_dir, f"{prefix}_w12_{idx:03d}.pt"), tensor)
+    for idx, tensor in enumerate(w3_list):
+        _save_tensor(os.path.join(case_dir, f"{prefix}_w3_{idx:03d}.pt"), tensor)
+    for idx, tensor in enumerate(d_scale_w12):
+        _save_tensor(os.path.join(case_dir, f"{prefix}_d_scale_w12_{idx:03d}.pt"), tensor)
+    for idx, tensor in enumerate(d_scale_w3):
+        _save_tensor(os.path.join(case_dir, f"{prefix}_d_scale_w3_{idx:03d}.pt"), tensor)
+
+    meta = {
+        "iteration": iteration,
+        "shape": [dim0, dim1],
+        "num_w12": len(w12_list),
+        "num_w3": len(w3_list),
+        "num_d_scale_w12": len(d_scale_w12),
+        "num_d_scale_w3": len(d_scale_w3),
+        "block_size": int(block_size),
+        "permuted_weights": bool(permuted_weights),
+        "experts_min": int(experts_min),
+        "experts_max": int(experts_max),
+        "activation": activation,
+        "extra_kwargs": extra_kwargs,
+    }
+    torch.save(meta, os.path.join(case_dir, f"{prefix}_meta.pt"))
+
+    print("dump_dir:", case_dir)
+    print("prefix:", prefix)
+    print("=====================")
+
 
 def _as_activation_str(activation):
     """Normalize activation to string for HPU custom op."""
@@ -1748,7 +1844,6 @@ class VllmMixtureOfExpertsOpMXFP4(VllmMixtureOfExpertsOpBase):
         return self._compiled_forward
 
     def forward(self, hidden_states, expert_routing_table, router_weights, permuted_weights=True, activation="silu"):
-        print("PAT PAT MXFP4 2")
         tokens_num, _ = hidden_states.shape
         activation = _as_activation_str(activation)
         kwargs = self._get_extra_kwargs(tokens_num)
@@ -1762,6 +1857,25 @@ class VllmMixtureOfExpertsOpMXFP4(VllmMixtureOfExpertsOpBase):
         w2_list = self._cached_w2_views
         w13_scale = self._cached_w13_scale_views
         w2_scale = self._cached_w2_scale_views
+
+        if _mark_moe_mxfp4_shape_seen(hidden_states.shape):
+            try:
+                _dump_moe_mxfp4_debug_case(hidden_states=hidden_states,
+                                           expert_routing_table=expert_routing_table,
+                                           router_weights=router_weights,
+                                           w12_list=w13_list,
+                                           w3_list=w2_list,
+                                           d_scale_w12=w13_scale,
+                                           d_scale_w3=w2_scale,
+                                           block_size=self.block_size,
+                                           permuted_weights=permuted_weights,
+                                           experts_min=self.experts_min,
+                                           experts_max=self.experts_max,
+                                           activation=activation,
+                                           extra_kwargs=kwargs)
+            except Exception:
+                logger.exception("Failed MXFP4 MoE debug dump for hidden_states.shape=%s",
+                                 tuple(hidden_states.shape))
 
         # expert_routing_table must be int32 for the mxfp4 op
         if expert_routing_table.dtype != torch.int32:
