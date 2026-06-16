@@ -1837,6 +1837,7 @@ class VllmMixtureOfExpertsOpMXFP4(VllmMixtureOfExpertsOpBase):
                     activation="silu",
                     experts_min=experts_min,
                     experts_max=experts_max,
+                    is_fp4=True,
                     chunk_size=chunk_size,
                     total_experts=total_experts,
                 )
@@ -1858,36 +1859,55 @@ class VllmMixtureOfExpertsOpMXFP4(VllmMixtureOfExpertsOpBase):
         w13_scale = self._cached_w13_scale_views
         w2_scale = self._cached_w2_scale_views
 
-        if _mark_moe_mxfp4_shape_seen(hidden_states.shape):
-            try:
-                _dump_moe_mxfp4_debug_case(hidden_states=hidden_states,
-                                           expert_routing_table=expert_routing_table,
-                                           router_weights=router_weights,
-                                           w12_list=w13_list,
-                                           w3_list=w2_list,
-                                           d_scale_w12=w13_scale,
-                                           d_scale_w3=w2_scale,
-                                           block_size=self.block_size,
-                                           permuted_weights=permuted_weights,
-                                           experts_min=self.experts_min,
-                                           experts_max=self.experts_max,
-                                           activation=activation,
-                                           extra_kwargs=kwargs)
-            except Exception:
-                logger.exception("Failed MXFP4 MoE debug dump for hidden_states.shape=%s",
-                                 tuple(hidden_states.shape))
+        #if _mark_moe_mxfp4_shape_seen(hidden_states.shape):
+            #print("Acitvation: ", activation)
+            #try:
+            #    _dump_moe_mxfp4_debug_case(hidden_states=hidden_states,
+            #                               expert_routing_table=expert_routing_table,
+            #                               router_weights=router_weights,
+            #                               w12_list=w13_list,
+            #                               w3_list=w2_list,
+            #                               d_scale_w12=w13_scale,
+            #                               d_scale_w3=w2_scale,
+            #                               block_size=self.block_size,
+            #                               permuted_weights=permuted_weights,
+            #                               experts_min=self.experts_min,
+            #                               experts_max=self.experts_max,
+            #                               activation=activation,
+            #                               extra_kwargs=kwargs)
+            #except Exception:
+            #    logger.exception("Failed MXFP4 MoE debug dump for hidden_states.shape=%s",
+            #                     tuple(hidden_states.shape))
 
         # expert_routing_table must be int32 for the mxfp4 op
         if expert_routing_table.dtype != torch.int32:
             expert_routing_table = expert_routing_table.to(torch.int32)
 
         compiled_fwd = self._get_compiled_forward()
-        return compiled_fwd(
+        abc = compiled_fwd(
             hidden_states, expert_routing_table, router_weights,
             w13_list, w2_list, w13_scale, w2_scale,
             self.block_size, activation, self.experts_min, self.experts_max,
             chunk_size, total_experts,
         )
+        if _mark_moe_mxfp4_shape_seen(hidden_states.shape):
+            print("Is nan?")
+            print("Hidden_states: ", torch.isnan(hidden_states).any().item())
+            print("Expert_routing_table: ", torch.isnan(expert_routing_table).any().item())
+            print("Router_weights: ", torch.isnan(router_weights).any().item())
+            for i, w in enumerate(w13_list):
+                print(f"w13_list[{i}]: ", torch.isnan(w).any().item())
+            for i, w in enumerate(w2_list):
+                print(f"w2_list[{i}]: ", torch.isnan(w).any().item())
+            for i, s in enumerate(w13_scale):
+                print(f"w13_scale[{i}]: ", torch.isnan(s).any().item())
+            for i, s in enumerate(w2_scale):
+                print(f"w2_scale[{i}]: ", torch.isnan(s).any().item())
+
+            #print("shape: ", hidden_states.shape)
+            print("Output: ", abc.cpu())
+            print("=================================")
+        return abc
 
 
 def oot_get_quantization_config(quantization: str) -> QuantizationConfig:
