@@ -140,6 +140,15 @@ class HPUGptOssMxfp4MoEMethod(GptOssMxfp4MoEMethod):
             permuted_weights=True,
             activation=_normalize_moe_activation(layer.activation),
         )
+
+        # Apply bias corrections (MXFP4 kernel doesn't support biases natively).
+        # w2_bias (down projection): exact correction, added after second GEMM.
+        w2_bias = getattr(layer, "w2_bias", None)
+        if w2_bias is not None:
+            # topk_ids: [tokens, topk], w2_bias: [num_experts, hidden_size]
+            expert_biases = w2_bias.data[topk_ids.long()]  # [tokens, topk, hidden_size]
+            output = output + (topk_weights.unsqueeze(-1) * expert_biases).sum(dim=1)
+
         if layer.moe_config.dp_size > 1:
             return output.view(*(output.size(0), *input_shape[1:]))
         else:
