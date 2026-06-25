@@ -37,7 +37,7 @@ def _patched_normalize_quantization_config(self, config: PretrainedConfig):
     # config so that BF16 params are allocated and we dequantize at load time.
     # When HPU_MXFP4_NATIVE=True, let the quant config flow through so
     # GptOssMxfp4Config is used and uint8 params are properly allocated.
-    if False:
+    if not HPU_MXFP4_NATIVE:
         if getattr(config, "model_type", None) == "gpt_oss":
             quant_cfg = getattr(config, "quantization_config", None)
             if quant_cfg is not None and quant_cfg.get("quant_method", "").lower() == "mxfp4":
@@ -310,7 +310,7 @@ def patched_load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> s
 
     # Only use custom loading for gpt_oss + mxfp4.
     if quant_method == "gpt_oss_mxfp4":
-        if 0:
+        if HPU_MXFP4_NATIVE:
             print("HPU_MXFP4_NATIVE enabled: using upstream MXFP4 weight loading logic for MoE layers")
             # Native mode: quant config is active, uint8 params are allocated
             # by GptOssMxfp4MoEMethod.create_weights(). Use upstream loader
